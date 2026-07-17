@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>Iron Log</title>
+<meta name="description" content="Your personal training record — workouts, machines, calories, and progress." />
+<meta name="theme-color" content="#141310" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Iron Log" />
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #141310; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { overscroll-behavior-y: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // ---- localStorage-backed polyfill of the window.storage API ----
+  // (the app code was originally written against Claude's artifact storage API;
+  // this polyfill lets the exact same app code run as a normal installed app)
+  window.storage = {
+    async get(key) {
+      try {
+        const v = localStorage.getItem("ironlog:" + key);
+        if (v === null) return null;
+        return { key, value: v };
+      } catch (e) {
+        throw e;
+      }
+    },
+    async set(key, value) {
+      try {
+        localStorage.setItem("ironlog:" + key, value);
+        return { key, value };
+      } catch (e) {
+        throw e;
+      }
+    },
+    async delete(key) {
+      try {
+        localStorage.removeItem("ironlog:" + key);
+        return { key, deleted: true };
+      } catch (e) {
+        throw e;
+      }
+    },
+    async list(prefix) {
+      try {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith("ironlog:" + (prefix || ""))) keys.push(k.replace("ironlog:", ""));
+        }
+        return { keys };
+      } catch (e) {
+        throw e;
+      }
+    },
+  };
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    });
+  }
+
+  // Visible fallback if a required library failed to load, instead of a silent black screen
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      const missing = [];
+      if (typeof React === "undefined") missing.push("React");
+      if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
+      if (typeof Recharts === "undefined") missing.push("Recharts");
+      if (typeof Babel === "undefined") missing.push("Babel");
+      if (typeof XLSX === "undefined") missing.push("XLSX");
+      const root = document.getElementById("root");
+      if (missing.length && root && !root.hasChildNodes()) {
+        root.innerHTML =
+          '<div style="color:#EDE8DD;font-family:sans-serif;padding:24px;text-align:center;">' +
+          "<p>Couldn't load: " + missing.join(", ") + "</p>" +
+          "<p style=\"color:#A8A395;font-size:13px;\">Check your internet connection and reload.</p>" +
+          "</div>";
+      }
+    }, 4000);
+  });
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } = Recharts;
+
+// ---- minimal original line-icon set (no external icon library needed) ----
+function Plus({ size = 20, strokeWidth = 2 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+function Trash2({ size = 20, strokeWidth = 2 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 7 20 7" /><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+      <path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+    </svg>
+  );
+}
+function Dumbbell({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="9" width="3" height="6" rx="1" /><rect x="19" y="9" width="3" height="6" rx="1" />
+      <rect x="5" y="7" width="2.5" height="10" rx="1" /><rect x="16.5" y="7" width="2.5" height="10" rx="1" />
+      <line x1="7.5" y1="12" x2="16.5" y2="12" />
+    </svg>
+  );
+}
+function ClipboardList({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="5" y="4" width="14" height="17" rx="2" /><rect x="9" y="2" width="6" height="3" rx="1" />
+      <line x1="8" y1="10" x2="16" y2="10" /><line x1="8" y1="13.5" x2="16" y2="13.5" /><line x1="8" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+function TrendingUp({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 17 9 11 13 15 21 6" /><polyline points="14 6 21 6 21 13" />
+    </svg>
+  );
+}
+function X({ size = 18, strokeWidth = 2 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="5" y1="5" x2="19" y2="19" /><line x1="19" y1="5" x2="5" y2="19" />
+    </svg>
+  );
+}
+function Check({ size = 16, strokeWidth = 2 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 12 9 17 20 5" />
+    </svg>
+  );
+}
+function Pencil({ size = 16, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 21l4-1 12-12-3-3-12 12z" /><path d="M14 5l3 3" />
+    </svg>
+  );
+}
+function Flame({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-.5-2-1-2.5.7 2 .5 3.5-1 5-2 1.5-5 1-6.5-1.5C4.8 8.7 6 5 9 3c.3 1.5 1 2 1.5 1.5C11 3.7 10.5 3 12 2z" />
+    </svg>
+  );
+}
+function BarChart3({ size = 16, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="20" x2="4" y2="12" /><line x1="10" y1="20" x2="10" y2="7" />
+      <line x1="16" y1="20" x2="16" y2="4" /><line x1="3" y1="21" x2="21" y2="21" />
+    </svg>
+  );
+}
+function Scale({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="3" x2="12" y2="21" /><line x1="5" y1="7" x2="19" y2="7" />
+      <path d="M5 7l-3 7a3 3 0 0 0 6 0z" /><path d="M19 7l-3 7a3 3 0 0 0 6 0z" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+    </svg>
+  );
+}
+function Download({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v12" /><polyline points="7 11 12 16 17 11" />
+      <path d="M4 18v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1" />
+    </svg>
+  );
+}
+function FileSpreadsheet({ size = 20, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2h9l5 5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 5 20V3.5A1.5 1.5 0 0 1 6.5 2z" />
+      <polyline points="15 2 15 8 21 8" />
+      <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+      <line x1="11" y1="13" x2="11" y2="17" />
+    </svg>
+  );
+}
+
+
+// ---- design tokens ----
+// bg (iron), surface (plate), steel (cool grey), rust (accent/hard), amber (medium), moss (ok), chalk (text)
+const C = {
+  bg: "#141310",
+  surface: "#1E1C17",
+  surfaceRaised: "#26231D",
+  line: "#332F27",
+  steel: "#8C8A82",
+  chalk: "#EDE8DD",
+  chalkDim: "#A8A395",
+  rust: "#B8431F",
+  amber: "#C9902E",
+  moss: "#6B8F55",
+};
+
+const DIFF = {
+  ok: { label: "OK", color: C.moss },
+  medium: { label: "Medium", color: C.amber },
+  hard: { label: "Hard", color: C.rust },
+};
+
+const uid = () => Math.random().toString(36).slice(2, 10);
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (d) => {
+  const dt = new Date(d + "T00:00:00");
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+};
+
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');`;
+
+const WEIGHT_OPTIONS = (() => {
+  const arr = [];
+  for (let w = 15; w <= 100; w += 2.5) arr.push(w);
+  return arr;
+})();
+const REP_OPTIONS = Array.from({ length: 12 }, (_, i) => i + 1);
+
+const HEIGHT_M = 1.85;
+const calcBmi = (weightKg) => weightKg / (HEIGHT_M * HEIGHT_M);
+
+function GymTracker() {
+  const [tab, setTab] = useState("log");
+  const [entries, setEntries] = useState([]);
+  const [machines, setMachines] = useState([]);
+  const [calories, setCalories] = useState([]);
+  const [bodyWeights, setBodyWeights] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        let e = [];
+        let m = [];
+        let c = [];
+        let bw = [];
+        try {
+          const r = await window.storage.get("entries", false);
+          if (r?.value) e = JSON.parse(r.value);
+        } catch (_) {}
+        try {
+          const r = await window.storage.get("machines", false);
+          if (r?.value) m = JSON.parse(r.value);
+        } catch (_) {}
+        try {
+          const r = await window.storage.get("calories", false);
+          if (r?.value) c = JSON.parse(r.value);
+        } catch (_) {}
+        try {
+          const r = await window.storage.get("bodyweights", false);
+          if (r?.value) bw = JSON.parse(r.value);
+        } catch (_) {}
+        setEntries(e);
+        setMachines(m);
+        setCalories(c);
+        setBodyWeights(bw);
+      } catch (err) {
+        setError("Couldn't load your saved data.");
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  const saveEntries = useCallback(async (next) => {
+    setEntries(next);
+    try {
+      await window.storage.set("entries", JSON.stringify(next), false);
+    } catch (err) {
+      setError("Couldn't save — your last change may not persist.");
+    }
+  }, []);
+
+  const saveMachines = useCallback(async (next) => {
+    setMachines(next);
+    try {
+      await window.storage.set("machines", JSON.stringify(next), false);
+    } catch (err) {
+      setError("Couldn't save — your last change may not persist.");
+    }
+  }, []);
+
+  const saveCalories = useCallback(async (next) => {
+    setCalories(next);
+    try {
+      await window.storage.set("calories", JSON.stringify(next), false);
+    } catch (err) {
+      setError("Couldn't save — your last change may not persist.");
+    }
+  }, []);
+
+  const saveBodyWeights = useCallback(async (next) => {
+    setBodyWeights(next);
+    try {
+      await window.storage.set("bodyweights", JSON.stringify(next), false);
+    } catch (err) {
+      setError("Couldn't save — your last change may not persist.");
+    }
+  }, []);
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.chalk, fontFamily: "'Inter', sans-serif" }}>
+      <style>{FONT_IMPORT}</style>
+      <Header />
+      {error && (
+        <div style={{ background: "#3A1F16", color: "#F0B49C", fontSize: 13, padding: "8px 16px", textAlign: "center" }}>
+          {error}
+        </div>
+      )}
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "0 16px 96px" }}>
+        {!loaded ? (
+          <div style={{ textAlign: "center", padding: "60px 0", color: C.chalkDim }}>Loading your log…</div>
+        ) : tab === "log" ? (
+          <LogTab entries={entries} machines={machines} onSave={saveEntries} />
+        ) : tab === "machines" ? (
+          <MachinesTab machines={machines} onSave={saveMachines} />
+        ) : tab === "calories" ? (
+          <CaloriesTab calories={calories} onSave={saveCalories} />
+        ) : tab === "bodyweight" ? (
+          <BodyWeightTab bodyWeights={bodyWeights} onSave={saveBodyWeights} />
+        ) : tab === "download" ? (
+          <DownloadTab entries={entries} calories={calories} bodyWeights={bodyWeights} />
+        ) : (
+          <ProgressTab entries={entries} />
+        )}
+      </div>
+      <BottomNav tab={tab} setTab={setTab} />
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <div style={{ padding: "22px 16px 14px", maxWidth: 480, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 34, letterSpacing: 1, color: C.chalk, lineHeight: 1 }}>
+          IRON LOG
+        </span>
+        <span style={{ width: 8, height: 8, borderRadius: 999, background: C.rust, display: "inline-block" }} />
+      </div>
+      <div style={{ color: C.chalkDim, fontSize: 13, marginTop: 2 }}>Your personal training record</div>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  const items = [
+    { id: "log", label: "Log", Icon: ClipboardList },
+    { id: "machines", label: "Machines", Icon: Dumbbell },
+    { id: "calories", label: "Calories", Icon: Flame },
+    { id: "bodyweight", label: "Weight", Icon: Scale },
+    { id: "progress", label: "Progress", Icon: TrendingUp },
+    { id: "download", label: "Export", Icon: Download },
+  ];
+  return (
+    <div
+      style={{
+        position: "fixed", bottom: 0, left: 0, right: 0, background: C.surface,
+        borderTop: `1px solid ${C.line}`, display: "flex", justifyContent: "center",
+        paddingBottom: "env(safe-area-inset-bottom, 0px)", zIndex: 10,
+      }}
+    >
+      <div style={{ maxWidth: 480, width: "100%", display: "flex" }}>
+        {items.map(({ id, label, Icon }) => {
+          const active = tab === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              style={{
+                flex: 1, background: "none", border: "none", padding: "10px 0 8px",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+                color: active ? C.rust : C.chalkDim, cursor: "pointer", minWidth: 0,
+              }}
+            >
+              <Icon size={18} strokeWidth={active ? 2.4 : 1.8} />
+              <span style={{ fontSize: 9.5, fontWeight: active ? 600 : 500, whiteSpace: "nowrap" }}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SectionTitle({ children }) {
+  return (
+    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 0.5, color: C.chalk, margin: "18px 0 10px" }}>
+      {children}
+    </div>
+  );
+}
+
+// ---------------- LOG TAB ----------------
+function LogTab({ entries, machines, onSave }) {
+  const [showForm, setShowForm] = useState(false);
+
+  const grouped = useMemo(() => {
+    const byDate = {};
+    for (const e of entries) {
+      (byDate[e.date] = byDate[e.date] || []).push(e);
+    }
+    return Object.entries(byDate).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [entries]);
+
+  const deleteEntry = (id) => onSave(entries.filter((e) => e.id !== id));
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+        <SectionTitle>Training Log</SectionTitle>
+        <button onClick={() => setShowForm(true)} style={btnPrimary}>
+          <Plus size={16} /> Add
+        </button>
+      </div>
+
+      {showForm && (
+        <EntryForm
+          machines={machines}
+          onCancel={() => setShowForm(false)}
+          onSubmit={(entry) => {
+            onSave([entry, ...entries]);
+            setShowForm(false);
+          }}
+        />
+      )}
+
+      {grouped.length === 0 && !showForm && (
+        <EmptyState text="Nothing logged yet. Tap Add to record your first exercise." />
+      )}
+
+      {grouped.map(([date, list]) => (
+        <div key={date} style={{ marginBottom: 18 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.steel, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            {fmtDate(date)}
+          </div>
+          {list.map((e) => (
+            <EntryCard key={e.id} entry={e} onDelete={() => deleteEntry(e.id)} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EntryCard({ entry, onDelete }) {
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>{entry.machine}</div>
+        <button onClick={onDelete} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer", padding: 4 }}>
+          <Trash2 size={16} />
+        </button>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {entry.sets.map((s, i) => (
+          <div
+            key={i}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, background: C.surfaceRaised,
+              border: `1px solid ${C.line}`, borderRadius: 999, padding: "4px 10px",
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5,
+            }}
+          >
+            <span style={{ width: 7, height: 7, borderRadius: 999, background: DIFF[s.difficulty]?.color || C.steel, display: "inline-block" }} />
+            {s.weight}kg × {s.reps}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EntryForm({ machines, onCancel, onSubmit }) {
+  const [date, setDate] = useState(todayStr());
+  const [machine, setMachine] = useState("");
+  const [sets, setSets] = useState([{ weight: WEIGHT_OPTIONS[0], reps: REP_OPTIONS[0], difficulty: "ok" }]);
+
+  const updateSet = (i, patch) => setSets(sets.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+  const addSet = () => setSets([...sets, { weight: sets[sets.length - 1]?.weight ?? WEIGHT_OPTIONS[0], reps: REP_OPTIONS[0], difficulty: "ok" }]);
+  const removeSet = (i) => setSets(sets.filter((_, idx) => idx !== i));
+
+  const canSubmit = machine.trim() && sets.length > 0 && sets.every((s) => s.weight !== "" && s.reps !== "");
+
+  const submit = () => {
+    if (!canSubmit) return;
+    onSubmit({
+      id: uid(),
+      date,
+      machine: machine.trim(),
+      sets: sets.map((s) => ({ weight: Number(s.weight), reps: Number(s.reps), difficulty: s.difficulty })),
+    });
+  };
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, margin: "12px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>New entry</div>
+        <button onClick={onCancel} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer" }}>
+          <X size={18} />
+        </button>
+      </div>
+
+      <Field label="Date">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+      </Field>
+      <Field label="Machine">
+        <input
+          type="text" value={machine} onChange={(e) => setMachine(e.target.value)}
+          placeholder="e.g. Leg press" style={inputStyle} list="machine-suggestions"
+        />
+        <datalist id="machine-suggestions">
+          {machines.map((m) => (
+            <option key={m.id} value={m.name} />
+          ))}
+        </datalist>
+      </Field>
+
+      <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "12px 0 6px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Sets
+      </div>
+      {sets.map((s, i) => (
+        <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+          <select
+            value={s.weight}
+            onChange={(e) => updateSet(i, { weight: e.target.value })}
+            style={{ ...inputStyle, width: 76, textAlign: "center", padding: "9px 4px" }}
+          >
+            {WEIGHT_OPTIONS.map((w) => (
+              <option key={w} value={w}>{w}kg</option>
+            ))}
+          </select>
+          <span style={{ color: C.steel }}>×</span>
+          <select
+            value={s.reps}
+            onChange={(e) => updateSet(i, { reps: e.target.value })}
+            style={{ ...inputStyle, width: 64, textAlign: "center", padding: "9px 4px" }}
+          >
+            {REP_OPTIONS.map((r) => (
+              <option key={r} value={r}>{r}</option>
+            ))}
+          </select>
+          <div style={{ display: "flex", gap: 4, flex: 1 }}>
+            {Object.entries(DIFF).map(([key, d]) => (
+              <button
+                key={key}
+                onClick={() => updateSet(i, { difficulty: key })}
+                style={{
+                  flex: 1, padding: "7px 0", borderRadius: 7, fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                  border: `1px solid ${s.difficulty === key ? d.color : C.line}`,
+                  background: s.difficulty === key ? d.color + "22" : "transparent",
+                  color: s.difficulty === key ? d.color : C.chalkDim,
+                }}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+          {sets.length > 1 && (
+            <button onClick={() => removeSet(i)} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer" }}>
+              <X size={16} />
+            </button>
+          )}
+        </div>
+      ))}
+
+      <button onClick={addSet} style={{ ...btnGhost, marginTop: 4 }}>
+        <Plus size={14} /> Add set
+      </button>
+
+      <button onClick={submit} disabled={!canSubmit} style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginTop: 14, opacity: canSubmit ? 1 : 0.5 }}>
+        <Check size={16} /> Save entry
+      </button>
+    </div>
+  );
+}
+
+// ---------------- MACHINES TAB ----------------
+function MachinesTab({ machines, onSave }) {
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState("");
+  const [notes, setNotes] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+
+  const add = () => {
+    if (!name.trim()) return;
+    onSave([{ id: uid(), name: name.trim(), notes: notes.trim() }, ...machines]);
+    setName("");
+    setNotes("");
+    setShowForm(false);
+  };
+
+  const remove = (id) => {
+    onSave(machines.filter((m) => m.id !== id));
+    if (editingId === id) setEditingId(null);
+  };
+
+  const startEdit = (m) => {
+    setEditingId(m.id);
+    setEditName(m.name);
+    setEditNotes(m.notes || "");
+    setShowForm(false);
+  };
+
+  const cancelEdit = () => setEditingId(null);
+
+  const saveEdit = (id) => {
+    if (!editName.trim()) return;
+    onSave(machines.map((m) => (m.id === id ? { ...m, name: editName.trim(), notes: editNotes.trim() } : m)));
+    setEditingId(null);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+        <SectionTitle>Machines</SectionTitle>
+        <button
+          onClick={() => {
+            setEditingId(null);
+            setShowForm(true);
+          }}
+          style={btnPrimary}
+        >
+          <Plus size={16} /> Add
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, margin: "12px 0" }}>
+          <Field label="Machine name">
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Cable row" style={inputStyle} />
+          </Field>
+          <Field label="Settings / notes (optional)">
+            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Seat 4, pin 8" style={inputStyle} />
+          </Field>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={add} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+              <Check size={16} /> Save
+            </button>
+            <button onClick={() => setShowForm(false)} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {machines.length === 0 && !showForm && (
+        <EmptyState text="No machines recorded yet. Add the ones you use with their settings." />
+      )}
+
+      {machines.map((m) =>
+        editingId === m.id ? (
+          <div key={m.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, marginBottom: 10 }}>
+            <Field label="Machine name">
+              <input value={editName} onChange={(e) => setEditName(e.target.value)} style={inputStyle} />
+            </Field>
+            <Field label="Settings / notes (optional)">
+              <input value={editNotes} onChange={(e) => setEditNotes(e.target.value)} style={inputStyle} />
+            </Field>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button onClick={() => saveEdit(m.id)} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+                <Check size={16} /> Save
+              </button>
+              <button onClick={cancelEdit} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div key={m.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 15 }}>{m.name}</div>
+              {m.notes && <div style={{ fontSize: 12.5, color: C.chalkDim, marginTop: 2 }}>{m.notes}</div>}
+            </div>
+            <div style={{ display: "flex", gap: 2 }}>
+              <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer", padding: 6 }}>
+                <Pencil size={16} />
+              </button>
+              <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer", padding: 6 }}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+// ---------------- CALORIES TAB ----------------
+function CaloriesTab({ calories, onSave }) {
+  const [showForm, setShowForm] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
+  const [date, setDate] = useState(todayStr());
+  const [amount, setAmount] = useState("");
+
+  const add = () => {
+    const val = Number(amount);
+    if (!amount || isNaN(val) || val <= 0) return;
+    onSave([{ id: uid(), date, calories: val }, ...calories]);
+    setAmount("");
+    setShowForm(false);
+  };
+
+  const remove = (id) => onSave(calories.filter((c) => c.id !== id));
+
+  const sorted = useMemo(
+    () => [...calories].sort((a, b) => (a.date < b.date ? 1 : -1)),
+    [calories]
+  );
+
+  const chartData = useMemo(
+    () => [...calories].sort((a, b) => (a.date > b.date ? 1 : -1)).map((c) => ({ date: c.date, calories: c.calories })),
+    [calories]
+  );
+
+  const avg = calories.length ? Math.round(calories.reduce((s, c) => s + c.calories, 0) / calories.length) : 0;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+        <SectionTitle>Calories</SectionTitle>
+        <button onClick={() => setShowForm(true)} style={btnPrimary}>
+          <Plus size={16} /> Add
+        </button>
+      </div>
+
+      {calories.length > 0 && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <StatCard label="Days logged" value={calories.length} />
+          <StatCard label="Avg kcal/day" value={avg} />
+        </div>
+      )}
+
+      {showForm && (
+        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, margin: "12px 0" }}>
+          <Field label="Date">
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+          </Field>
+          <Field label="Calories eaten (kcal)">
+            <input
+              type="number" inputMode="numeric" value={amount} placeholder="e.g. 2200"
+              onChange={(e) => setAmount(e.target.value)} style={inputStyle}
+            />
+          </Field>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={add} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+              <Check size={16} /> Save
+            </button>
+            <button onClick={() => setShowForm(false)} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {calories.length === 0 && !showForm ? (
+        <EmptyState text="No calorie intake logged yet. Tap Add to record today's total." />
+      ) : (
+        <button
+          onClick={() => setShowGraph((v) => !v)}
+          style={{ ...btnGhost, width: "100%", justifyContent: "center", margin: "4px 0 16px" }}
+        >
+          <BarChart3 size={16} /> {showGraph ? "Hide graph" : "Show calories over time"}
+        </button>
+      )}
+
+      {showGraph && chartData.length > 0 && (
+        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 8px 4px", marginBottom: 16 }}>
+          {chartData.length < 2 ? (
+            <div style={{ textAlign: "center", color: C.chalkDim, fontSize: 13, padding: "20px 0" }}>
+              Log a couple more days to see a trend line.
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={chartData} margin={{ top: 5, right: 12, left: -18, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} strokeDasharray="3 3" />
+                <XAxis dataKey="date" tickFormatter={(d) => fmtDate(d).replace(/, \d+$/, "")} tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <YAxis tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <Tooltip
+                  labelFormatter={fmtDate}
+                  contentStyle={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: C.chalk }}
+                  formatter={(v) => [`${v} kcal`, "Calories"]}
+                />
+                <Line type="monotone" dataKey="calories" stroke={C.moss} strokeWidth={2.5} dot={{ r: 3, fill: C.moss }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      )}
+
+      {sorted.map((c) => (
+        <div key={c.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.steel, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              {fmtDate(c.date)}
+            </div>
+            <div style={{ fontWeight: 600, fontSize: 15, marginTop: 2 }}>{c.calories} kcal</div>
+          </div>
+          <button onClick={() => remove(c.id)} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer", padding: 4 }}>
+            <Trash2 size={16} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------- BODY WEIGHT TAB ----------------
+function BodyWeightTab({ bodyWeights, onSave }) {
+  const [showForm, setShowForm] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
+  const [date, setDate] = useState(todayStr());
+  const [weight, setWeight] = useState("");
+
+  const add = () => {
+    const val = Number(weight);
+    if (!weight || isNaN(val) || val <= 0) return;
+    onSave([{ id: uid(), date, weight: val }, ...bodyWeights]);
+    setWeight("");
+    setShowForm(false);
+  };
+
+  const remove = (id) => onSave(bodyWeights.filter((w) => w.id !== id));
+
+  const sorted = useMemo(
+    () => [...bodyWeights].sort((a, b) => (a.date < b.date ? 1 : -1)),
+    [bodyWeights]
+  );
+
+  const chartData = useMemo(
+    () =>
+      [...bodyWeights]
+        .sort((a, b) => (a.date > b.date ? 1 : -1))
+        .map((w) => ({ date: w.date, weight: w.weight, bmi: Number(calcBmi(w.weight).toFixed(1)) })),
+    [bodyWeights]
+  );
+
+  const latest = sorted[0];
+  const latestBmi = latest ? calcBmi(latest.weight) : null;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+        <SectionTitle>Body Weight</SectionTitle>
+        <button onClick={() => setShowForm(true)} style={btnPrimary}>
+          <Plus size={16} /> Add
+        </button>
+      </div>
+
+      {bodyWeights.length > 0 && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <StatCard label="Latest kg" value={latest.weight} />
+          <StatCard label="BMI" value={latestBmi.toFixed(1)} />
+          <StatCard label="Entries" value={bodyWeights.length} />
+        </div>
+      )}
+
+      {showForm && (
+        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 16, margin: "12px 0" }}>
+          <Field label="Date">
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+          </Field>
+          <Field label="Body weight (kg)">
+            <input
+              type="number" inputMode="decimal" step="0.1" value={weight} placeholder="e.g. 78.5"
+              onChange={(e) => setWeight(e.target.value)} style={inputStyle}
+            />
+          </Field>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={add} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+              <Check size={16} /> Save
+            </button>
+            <button onClick={() => setShowForm(false)} style={{ ...btnGhost, flex: 1, justifyContent: "center" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {bodyWeights.length === 0 && !showForm ? (
+        <EmptyState text="No body weight logged yet. Tap Add to record today's weight." />
+      ) : (
+        <button
+          onClick={() => setShowGraph((v) => !v)}
+          style={{ ...btnGhost, width: "100%", justifyContent: "center", margin: "4px 0 16px" }}
+        >
+          <BarChart3 size={16} /> {showGraph ? "Hide graphs" : "Show weight & BMI over time"}
+        </button>
+      )}
+
+      {showGraph && chartData.length > 0 && (
+        chartData.length < 2 ? (
+          <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, textAlign: "center", color: C.chalkDim, fontSize: 13, padding: "20px 0", marginBottom: 16 }}>
+            Log a couple more entries to see a trend line.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+              Body weight over time (kg)
+            </div>
+            <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 8px 4px", marginBottom: 16 }}>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={chartData} margin={{ top: 5, right: 12, left: -18, bottom: 0 }}>
+                  <CartesianGrid stroke={C.line} strokeDasharray="3 3" />
+                  <XAxis dataKey="date" tickFormatter={(d) => fmtDate(d).replace(/, \d+$/, "")} tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                  <YAxis tick={{ fill: C.chalkDim, fontSize: 11 }} domain={["auto", "auto"]} />
+                  <Tooltip
+                    labelFormatter={fmtDate}
+                    contentStyle={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                    labelStyle={{ color: C.chalk }}
+                    formatter={(v) => [`${v} kg`, "Weight"]}
+                  />
+                  <Line type="monotone" dataKey="weight" stroke={C.rust} strokeWidth={2.5} dot={{ r: 3, fill: C.rust }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+              BMI over time (height {HEIGHT_M}m)
+            </div>
+            <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 8px 4px", marginBottom: 16 }}>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={chartData} margin={{ top: 5, right: 12, left: -18, bottom: 0 }}>
+                  <CartesianGrid stroke={C.line} strokeDasharray="3 3" />
+                  <XAxis dataKey="date" tickFormatter={(d) => fmtDate(d).replace(/, \d+$/, "")} tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                  <YAxis tick={{ fill: C.chalkDim, fontSize: 11 }} domain={["auto", "auto"]} />
+                  <Tooltip
+                    labelFormatter={fmtDate}
+                    contentStyle={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                    labelStyle={{ color: C.chalk }}
+                    formatter={(v) => [v, "BMI"]}
+                  />
+                  <Line type="monotone" dataKey="bmi" stroke={C.amber} strokeWidth={2.5} dot={{ r: 3, fill: C.amber }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </>
+        )
+      )}
+
+      {sorted.map((w) => (
+        <div key={w.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.steel, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              {fmtDate(w.date)}
+            </div>
+            <div style={{ fontWeight: 600, fontSize: 15, marginTop: 2 }}>
+              {w.weight} kg <span style={{ color: C.chalkDim, fontWeight: 500, fontSize: 13 }}>· BMI {calcBmi(w.weight).toFixed(1)}</span>
+            </div>
+          </div>
+          <button onClick={() => remove(w.id)} style={{ background: "none", border: "none", color: C.steel, cursor: "pointer", padding: 4 }}>
+            <Trash2 size={16} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------- DOWNLOAD TAB ----------------
+function DownloadTab({ entries, calories, bodyWeights }) {
+  const [status, setStatus] = useState("");
+
+  const buildLogSheet = () => {
+    const rows = [];
+    [...entries]
+      .sort((a, b) => (a.date > b.date ? 1 : -1))
+      .forEach((e) => {
+        e.sets.forEach((s, i) => {
+          rows.push({
+            Date: e.date,
+            Machine: e.machine,
+            Set: i + 1,
+            "Weight (kg)": s.weight,
+            Reps: s.reps,
+            Difficulty: DIFF[s.difficulty]?.label || s.difficulty,
+          });
+        });
+      });
+    return rows;
+  };
+
+  const buildCaloriesSheet = () =>
+    [...calories]
+      .sort((a, b) => (a.date > b.date ? 1 : -1))
+      .map((c) => ({ Date: c.date, "Calories (kcal)": c.calories }));
+
+  const buildWeightSheet = () =>
+    [...bodyWeights]
+      .sort((a, b) => (a.date > b.date ? 1 : -1))
+      .map((w) => ({ Date: w.date, "Weight (kg)": w.weight, BMI: Number(calcBmi(w.weight).toFixed(1)) }));
+
+  const downloadSheet = (rows, sheetName, fileName) => {
+    if (!rows.length) {
+      setStatus(`No ${sheetName.toLowerCase()} data to export yet.`);
+      return;
+    }
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, fileName);
+    setStatus(`${sheetName} exported.`);
+  };
+
+  const downloadAll = () => {
+    const log = buildLogSheet();
+    const cal = buildCaloriesSheet();
+    const bw = buildWeightSheet();
+    if (!log.length && !cal.length && !bw.length) {
+      setStatus("No data to export yet.");
+      return;
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(log.length ? log : [{ Date: "", Machine: "", Set: "", "Weight (kg)": "", Reps: "", Difficulty: "" }]), "Log");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cal.length ? cal : [{ Date: "", "Calories (kcal)": "" }]), "Calories");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bw.length ? bw : [{ Date: "", "Weight (kg)": "", BMI: "" }]), "Body Weight");
+    XLSX.writeFile(wb, `iron-log-${todayStr()}.xlsx`);
+    setStatus("All data exported.");
+  };
+
+  return (
+    <div>
+      <SectionTitle>Export</SectionTitle>
+      <div style={{ color: C.chalkDim, fontSize: 13, marginBottom: 16 }}>
+        Download your data as Excel spreadsheets — handy for backups or your own analysis.
+      </div>
+
+      <button onClick={downloadAll} style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginBottom: 16 }}>
+        <FileSpreadsheet size={16} /> Download all data (.xlsx)
+      </button>
+
+      <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "4px 0 8px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Or export separately
+      </div>
+
+      <ExportRow
+        label="Training log"
+        count={entries.reduce((n, e) => n + e.sets.length, 0)}
+        unit="sets"
+        onClick={() => downloadSheet(buildLogSheet(), "Log", `iron-log-workouts-${todayStr()}.xlsx`)}
+      />
+      <ExportRow
+        label="Calories"
+        count={calories.length}
+        unit="days"
+        onClick={() => downloadSheet(buildCaloriesSheet(), "Calories", `iron-log-calories-${todayStr()}.xlsx`)}
+      />
+      <ExportRow
+        label="Body weight"
+        count={bodyWeights.length}
+        unit="entries"
+        onClick={() => downloadSheet(buildWeightSheet(), "Body Weight", `iron-log-bodyweight-${todayStr()}.xlsx`)}
+      />
+
+      {status && (
+        <div style={{ marginTop: 14, fontSize: 12.5, color: C.chalkDim, textAlign: "center" }}>{status}</div>
+      )}
+    </div>
+  );
+}
+
+function ExportRow({ label, count, unit, onClick }) {
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>{label}</div>
+        <div style={{ fontSize: 12.5, color: C.chalkDim, marginTop: 2 }}>{count} {unit}</div>
+      </div>
+      <button onClick={onClick} style={{ ...btnGhost, padding: "7px 12px" }}>
+        <Download size={15} /> .xlsx
+      </button>
+    </div>
+  );
+}
+
+// ---------------- PROGRESS TAB ----------------
+function ProgressTab({ entries }) {
+  const exercises = useMemo(() => {
+    const set = new Set(entries.map((e) => e.machine));
+    return Array.from(set).sort();
+  }, [entries]);
+
+  const [selected, setSelected] = useState("");
+  useEffect(() => {
+    if (!selected && exercises.length) setSelected(exercises[0]);
+    if (selected && !exercises.includes(selected)) setSelected(exercises[0] || "");
+  }, [exercises, selected]);
+
+  const data = useMemo(() => {
+    const rows = entries
+      .filter((e) => e.machine === selected)
+      .map((e) => {
+        const maxWeight = Math.max(...e.sets.map((s) => s.weight));
+        const volume = e.sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
+        return { date: e.date, maxWeight, volume };
+      })
+      .sort((a, b) => (a.date > b.date ? 1 : -1));
+    return rows;
+  }, [entries, selected]);
+
+  const totalWorkouts = new Set(entries.map((e) => e.date)).size;
+  const totalSets = entries.reduce((n, e) => n + e.sets.length, 0);
+
+  if (exercises.length === 0) {
+    return (
+      <div>
+        <SectionTitle>Progress</SectionTitle>
+        <EmptyState text="Log a few workouts and your progress charts will show up here." />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <SectionTitle>Progress</SectionTitle>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+        <StatCard label="Sessions" value={totalWorkouts} />
+        <StatCard label="Sets logged" value={totalSets} />
+        <StatCard label="Machines" value={exercises.length} />
+      </div>
+
+      <Field label="Machine">
+        <select value={selected} onChange={(e) => setSelected(e.target.value)} style={inputStyle}>
+          {exercises.map((ex) => (
+            <option key={ex} value={ex}>{ex}</option>
+          ))}
+        </select>
+      </Field>
+
+      {data.length < 2 ? (
+        <EmptyState text="Log this exercise a couple more times to see a trend line." />
+      ) : (
+        <>
+          <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "16px 0 4px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Top weight per session (kg)
+          </div>
+          <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 8px 4px" }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={data} margin={{ top: 5, right: 12, left: -18, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} strokeDasharray="3 3" />
+                <XAxis dataKey="date" tickFormatter={(d) => fmtDate(d).replace(/, \d+$/, "")} tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <YAxis tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <Tooltip
+                  labelFormatter={fmtDate}
+                  contentStyle={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: C.chalk }}
+                />
+                <Line type="monotone" dataKey="maxWeight" stroke={C.rust} strokeWidth={2.5} dot={{ r: 3, fill: C.rust }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ fontSize: 12.5, color: C.chalkDim, margin: "16px 0 4px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Total volume per session (kg × reps)
+          </div>
+          <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 8px 4px" }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={data} margin={{ top: 5, right: 12, left: -18, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} strokeDasharray="3 3" />
+                <XAxis dataKey="date" tickFormatter={(d) => fmtDate(d).replace(/, \d+$/, "")} tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <YAxis tick={{ fill: C.chalkDim, fontSize: 11 }} />
+                <Tooltip
+                  labelFormatter={fmtDate}
+                  contentStyle={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: C.chalk }}
+                />
+                <Line type="monotone" dataKey="volume" stroke={C.amber} strokeWidth={2.5} dot={{ r: 3, fill: C.amber }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value }) {
+  return (
+    <div style={{ flex: 1, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 20, fontWeight: 600, color: C.chalk }}>{value}</div>
+      <div style={{ fontSize: 10.5, color: C.chalkDim, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: C.chalkDim, marginBottom: 4 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return (
+    <div style={{ textAlign: "center", padding: "36px 16px", color: C.chalkDim, fontSize: 13.5, border: `1px dashed ${C.line}`, borderRadius: 12, marginTop: 12 }}>
+      {text}
+    </div>
+  );
+}
+
+const inputStyle = {
+  width: "100%", background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: 8,
+  padding: "9px 10px", color: C.chalk, fontSize: 14, boxSizing: "border-box", fontFamily: "'Inter', sans-serif",
+};
+
+const btnPrimary = {
+  display: "flex", alignItems: "center", gap: 6, background: C.rust, color: C.chalk, border: "none",
+  borderRadius: 8, padding: "8px 14px", fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+};
+
+const btnGhost = {
+  display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "transparent",
+  color: C.chalkDim, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 14px", fontSize: 13, cursor: "pointer",
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<GymTracker />);
+</script>
+</body>
+</html>
